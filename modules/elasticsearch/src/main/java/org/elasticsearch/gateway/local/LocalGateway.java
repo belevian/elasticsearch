@@ -25,7 +25,12 @@ import org.elasticsearch.cluster.ClusterChangedEvent;
 import org.elasticsearch.cluster.ClusterService;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.ClusterStateListener;
-import org.elasticsearch.cluster.routing.*;
+import org.elasticsearch.cluster.metadata.MetaData;
+import org.elasticsearch.cluster.routing.IndexRoutingTable;
+import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
+import org.elasticsearch.cluster.routing.MutableShardRouting;
+import org.elasticsearch.cluster.routing.RoutingNode;
+import org.elasticsearch.cluster.routing.ShardRoutingState;
 import org.elasticsearch.common.collect.Sets;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
 import org.elasticsearch.common.compress.lzf.LZF;
@@ -38,14 +43,23 @@ import org.elasticsearch.common.io.stream.BytesStreamInput;
 import org.elasticsearch.common.io.stream.CachedStreamInput;
 import org.elasticsearch.common.io.stream.LZFStreamInput;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.xcontent.*;
+import org.elasticsearch.common.xcontent.ToXContent;
+import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.gateway.Gateway;
 import org.elasticsearch.gateway.GatewayException;
 import org.elasticsearch.index.gateway.local.LocalIndexGatewayModule;
 import org.elasticsearch.index.shard.ShardId;
 
-import java.io.*;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.FilenameFilter;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -152,7 +166,9 @@ public class LocalGateway extends AbstractLifecycleComponent<Gateway> implements
             listener.onSuccess(ClusterState.builder().build());
         } else {
             logger.debug("elected state from [{}]", electedState.node());
-            listener.onSuccess(ClusterState.builder().version(electedState.state().version()).metaData(electedState.state().metaData()).build());
+            ClusterState.Builder builder = ClusterState.builder().version(electedState.state().version());
+            builder.metaData(MetaData.builder().metaData(electedState.state().metaData()).version(electedState.state().version()));
+            listener.onSuccess(builder.build());
         }
     }
 
@@ -176,34 +192,32 @@ public class LocalGateway extends AbstractLifecycleComponent<Gateway> implements
         }
 
         // we only write the local metadata if this is a possible master node
-        // currently, we always write the metadata, since we want to keep it in sync with the latest version, but
-        // we need to think of a better way to not persist it when nothing changed
-        if (event.state().nodes().localNode().masterNode()) {
+        if (event.state().nodes().localNode().masterNode() && event.metaDataChanged()) {
             executor.execute(new Runnable() {
                 @Override public void run() {
                     LocalGatewayMetaState.Builder builder = LocalGatewayMetaState.builder();
                     if (currentMetaState != null) {
                         builder.state(currentMetaState);
                     }
-                    builder.version(event.state().version());
+                    final long version = event.state().metaData().version();
+                    builder.version(version);
                     builder.metaData(event.state().metaData());
 
                     try {
+                        File stateFile = new File(location, "metadata-" + version);
+                        OutputStream fos = new FileOutputStream(stateFile);
+                        if (compress) {
+                            fos = new LZFOutputStream(fos);
+                        }
                         LocalGatewayMetaState stateToWrite = builder.build();
-                        XContentBuilder xContentBuilder = XContentFactory.contentBuilder(XContentType.JSON);
+                        XContentBuilder xContentBuilder = XContentFactory.contentBuilder(XContentType.JSON, fos);
                         if (prettyPrint) {
                             xContentBuilder.prettyPrint();
                         }
                         xContentBuilder.startObject();
                         LocalGatewayMetaState.Builder.toXContent(stateToWrite, xContentBuilder, ToXContent.EMPTY_PARAMS);
                         xContentBuilder.endObject();
-
-                        File stateFile = new File(location, "metadata-" + event.state().version());
-                        OutputStream fos = new FileOutputStream(stateFile);
-                        if (compress) {
-                            fos = new LZFOutputStream(fos);
-                        }
-                        fos.write(xContentBuilder.unsafeBytes(), 0, xContentBuilder.unsafeBytesLength());
+                        xContentBuilder.close();
                         fos.close();
 
                         FileSystemUtils.syncFile(stateFile);
@@ -213,7 +227,7 @@ public class LocalGateway extends AbstractLifecycleComponent<Gateway> implements
                         // delete all the other files
                         File[] files = location.listFiles(new FilenameFilter() {
                             @Override public boolean accept(File dir, String name) {
-                                return name.startsWith("metadata-") && !name.equals("metadata-" + event.state().version());
+                                return name.startsWith("metadata-") && !name.equals("metadata-" + version);
                             }
                         });
                         for (File file : files) {
@@ -228,79 +242,86 @@ public class LocalGateway extends AbstractLifecycleComponent<Gateway> implements
         }
 
         if (event.state().nodes().localNode().dataNode() && event.routingTableChanged()) {
-            executor.execute(new Runnable() {
-                @Override public void run() {
-                    LocalGatewayStartedShards.Builder builder = LocalGatewayStartedShards.builder();
-                    if (currentStartedShards != null) {
-                        builder.state(currentStartedShards);
-                    }
-                    builder.version(event.state().version());
-                    // remove from the current state all the shards that are primary and started somewhere, we won't need them anymore
-                    // and if they are still here, we will add them in the next phase
+            LocalGatewayStartedShards.Builder builder = LocalGatewayStartedShards.builder();
+            if (currentStartedShards != null) {
+                builder.state(currentStartedShards);
+            }
+            builder.version(event.state().version());
 
-                    // Also note, this works well when closing an index, since a closed index will have no routing shards entries
-                    // so they won't get removed (we want to keep the fact that those shards are allocated on this node if needed)
-                    for (IndexRoutingTable indexRoutingTable : event.state().routingTable()) {
-                        for (IndexShardRoutingTable indexShardRoutingTable : indexRoutingTable) {
-                            if (indexShardRoutingTable.countWithState(ShardRoutingState.STARTED) == indexShardRoutingTable.size()) {
-                                builder.remove(indexShardRoutingTable.shardId());
-                            }
-                        }
-                    }
-                    // remove deleted indices from the started shards
-                    for (ShardId shardId : builder.build().shards().keySet()) {
-                        if (!event.state().metaData().hasIndex(shardId.index().name())) {
-                            builder.remove(shardId);
-                        }
-                    }
-                    // now, add all the ones that are active and on this node
-                    RoutingNode routingNode = event.state().readOnlyRoutingNodes().node(event.state().nodes().localNodeId());
-                    if (routingNode != null) {
-                        // out node is not in play yet...
-                        for (MutableShardRouting shardRouting : routingNode) {
-                            if (shardRouting.active()) {
-                                builder.put(shardRouting.shardId(), event.state().version());
-                            }
-                        }
-                    }
+            boolean changed = false;
 
-                    try {
-                        LocalGatewayStartedShards stateToWrite = builder.build();
-                        XContentBuilder xContentBuilder = XContentFactory.contentBuilder(XContentType.JSON);
-                        if (prettyPrint) {
-                            xContentBuilder.prettyPrint();
-                        }
-                        xContentBuilder.startObject();
-                        LocalGatewayStartedShards.Builder.toXContent(stateToWrite, xContentBuilder, ToXContent.EMPTY_PARAMS);
-                        xContentBuilder.endObject();
+            // remove from the current state all the shards that are primary and started somewhere, we won't need them anymore
+            // and if they are still here, we will add them in the next phase
 
-                        File stateFile = new File(location, "shards-" + event.state().version());
-                        OutputStream fos = new FileOutputStream(stateFile);
-                        if (compress) {
-                            fos = new LZFOutputStream(fos);
-                        }
-                        fos.write(xContentBuilder.unsafeBytes(), 0, xContentBuilder.unsafeBytesLength());
-                        fos.close();
-
-                        FileSystemUtils.syncFile(stateFile);
-
-                        currentStartedShards = stateToWrite;
-                    } catch (IOException e) {
-                        logger.warn("failed to write updated state", e);
-                        return;
-                    }
-
-                    // delete all the other files
-                    File[] files = location.listFiles(new FilenameFilter() {
-                        @Override public boolean accept(File dir, String name) {
-                            return name.startsWith("shards-") && !name.equals("shards-" + event.state().version());
-                        }
-                    });
-                    for (File file : files) {
-                        file.delete();
+            // Also note, this works well when closing an index, since a closed index will have no routing shards entries
+            // so they won't get removed (we want to keep the fact that those shards are allocated on this node if needed)
+            for (IndexRoutingTable indexRoutingTable : event.state().routingTable()) {
+                for (IndexShardRoutingTable indexShardRoutingTable : indexRoutingTable) {
+                    if (indexShardRoutingTable.countWithState(ShardRoutingState.STARTED) == indexShardRoutingTable.size()) {
+                        changed |= builder.remove(indexShardRoutingTable.shardId());
                     }
                 }
-            });
+            }
+            // remove deleted indices from the started shards
+            for (ShardId shardId : builder.build().shards().keySet()) {
+                if (!event.state().metaData().hasIndex(shardId.index().name())) {
+                    changed |= builder.remove(shardId);
+                }
+            }
+            // now, add all the ones that are active and on this node
+            RoutingNode routingNode = event.state().readOnlyRoutingNodes().node(event.state().nodes().localNodeId());
+            if (routingNode != null) {
+                // out node is not in play yet...
+                for (MutableShardRouting shardRouting : routingNode) {
+                    if (shardRouting.active()) {
+                        changed |= builder.put(shardRouting.shardId(), shardRouting.version());
+                    }
+                }
+            }
+
+            // only write if something changed...
+            if (changed) {
+                final LocalGatewayStartedShards stateToWrite = builder.build();
+                executor.execute(new Runnable() {
+                    @Override public void run() {
+                        try {
+                            File stateFile = new File(location, "shards-" + event.state().version());
+                            OutputStream fos = new FileOutputStream(stateFile);
+                            if (compress) {
+                                fos = new LZFOutputStream(fos);
+                            }
+
+                            XContentBuilder xContentBuilder = XContentFactory.contentBuilder(XContentType.JSON, fos);
+                            if (prettyPrint) {
+                                xContentBuilder.prettyPrint();
+                            }
+                            xContentBuilder.startObject();
+                            LocalGatewayStartedShards.Builder.toXContent(stateToWrite, xContentBuilder, ToXContent.EMPTY_PARAMS);
+                            xContentBuilder.endObject();
+                            xContentBuilder.close();
+
+                            fos.close();
+
+                            FileSystemUtils.syncFile(stateFile);
+
+                            currentStartedShards = stateToWrite;
+                        } catch (IOException e) {
+                            logger.warn("failed to write updated state", e);
+                            return;
+                        }
+
+                        // delete all the other files
+                        File[] files = location.listFiles(new FilenameFilter() {
+                            @Override public boolean accept(File dir, String name) {
+                                return name.startsWith("shards-") && !name.equals("shards-" + event.state().version());
+                            }
+                        });
+                        for (File file : files) {
+                            file.delete();
+                        }
+                    }
+                });
+            }
         }
     }
 

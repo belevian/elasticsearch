@@ -46,6 +46,7 @@ import org.elasticsearch.threadpool.ThreadPool;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.elasticsearch.action.search.type.TransportSearchHelper.*;
@@ -104,13 +105,15 @@ public abstract class TransportSearchTypeAction extends BaseAction<SearchRequest
 
             nodes = clusterState.nodes();
 
-            request.indices(clusterState.metaData().concreteIndices(request.indices()));
+            String[] concreteIndices = clusterState.metaData().concreteIndices(request.indices());
 
-            for (String index : request.indices()) {
+            for (String index : concreteIndices) {
                 clusterState.blocks().indexBlockedRaiseException(ClusterBlockLevel.READ, index);
             }
 
-            shardsIts = clusterService.operationRouting().searchShards(clusterState, request.indices(), request.queryHint(), request.routing(), request.preference());
+            Map<String, Set<String>> routingMap = clusterState.metaData().resolveSearchRouting(request.routing(), request.indices());
+
+            shardsIts = clusterService.operationRouting().searchShards(clusterState, request.indices(), concreteIndices, request.queryHint(), routingMap, request.preference());
             expectedSuccessfulOps = shardsIts.size();
             // we need to add 1 for non active partition, since we count it in the total!
             expectedTotalOps = shardsIts.totalSizeActiveWith1ForEmpty();
@@ -189,7 +192,8 @@ public abstract class TransportSearchTypeAction extends BaseAction<SearchRequest
                 if (node == null) {
                     onFirstPhaseResult(shard, shardIt, null);
                 } else {
-                    sendExecuteFirstPhase(node, internalSearchRequest(shard, shardsIts.size(), request), new SearchServiceListener<FirstResult>() {
+                    String[] filteringAliases = clusterService.state().metaData().filteringAliases(shard.index(), request.indices());
+                    sendExecuteFirstPhase(node, internalSearchRequest(shard, shardsIts.size(), request, filteringAliases), new SearchServiceListener<FirstResult>() {
                         @Override public void onResult(FirstResult result) {
                             onFirstPhaseResult(shard, result, shardIt);
                         }

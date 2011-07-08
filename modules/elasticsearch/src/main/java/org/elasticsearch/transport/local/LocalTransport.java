@@ -25,7 +25,13 @@ import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.ThrowableObjectInputStream;
-import org.elasticsearch.common.io.stream.*;
+import org.elasticsearch.common.io.stream.BytesStreamInput;
+import org.elasticsearch.common.io.stream.BytesStreamOutput;
+import org.elasticsearch.common.io.stream.CachedStreamInput;
+import org.elasticsearch.common.io.stream.CachedStreamOutput;
+import org.elasticsearch.common.io.stream.HandlesStreamOutput;
+import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.io.stream.Streamable;
 import org.elasticsearch.common.settings.ImmutableSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.BoundTransportAddress;
@@ -111,6 +117,10 @@ public class LocalTransport extends AbstractLifecycleComponent<Transport> implem
         return connectedNodes.containsKey(node);
     }
 
+    @Override public void connectToNodeLight(DiscoveryNode node) throws ConnectTransportException {
+        connectToNode(node);
+    }
+
     @Override public void connectToNode(DiscoveryNode node) throws ConnectTransportException {
         synchronized (this) {
             if (connectedNodes.containsKey(node)) {
@@ -154,8 +164,6 @@ public class LocalTransport extends AbstractLifecycleComponent<Transport> implem
 
             final byte[] data = ((BytesStreamOutput) stream.wrappedOut()).copiedByteArray();
 
-            transportServiceAdapter.sent(data.length);
-
             threadPool.cached().execute(new Runnable() {
                 @Override public void run() {
                     targetTransport.messageReceived(data, action, LocalTransport.this, requestId);
@@ -171,8 +179,6 @@ public class LocalTransport extends AbstractLifecycleComponent<Transport> implem
     }
 
     void messageReceived(byte[] data, String action, LocalTransport sourceTransport, @Nullable final Long sendRequestId) {
-        transportServiceAdapter.received(data.length);
-
         StreamInput stream = new BytesStreamInput(data);
         stream = CachedStreamInput.cachedHandles(stream);
 

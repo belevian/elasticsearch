@@ -30,7 +30,11 @@ import org.elasticsearch.common.collect.Sets;
 import org.elasticsearch.common.trove.ExtTIntArrayList;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.node.internal.InternalNode;
-import org.elasticsearch.search.*;
+import org.elasticsearch.search.Scroll;
+import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.SearchHits;
+import org.elasticsearch.search.SearchService;
+import org.elasticsearch.search.SearchShardTarget;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.controller.SearchPhaseController;
 import org.elasticsearch.search.controller.ShardDoc;
@@ -63,7 +67,7 @@ import static org.elasticsearch.common.collect.Lists.*;
 import static org.elasticsearch.common.collect.Maps.*;
 import static org.elasticsearch.common.settings.ImmutableSettings.*;
 import static org.elasticsearch.common.unit.TimeValue.*;
-import static org.elasticsearch.index.query.xcontent.QueryBuilders.*;
+import static org.elasticsearch.index.query.QueryBuilders.*;
 import static org.elasticsearch.search.builder.SearchSourceBuilder.*;
 import static org.hamcrest.MatcherAssert.*;
 import static org.hamcrest.Matchers.*;
@@ -114,7 +118,7 @@ public class ThreeShardsEmbeddedSearchTests extends AbstractNodesTests {
                 .from(0).size(60).explain(true).indexBoost("test", 1.0f).indexBoost("test2", 2.0f);
 
         List<DfsSearchResult> dfsResults = newArrayList();
-        for (ShardIterator shardIt : clusterService.operationRouting().searchShards(clusterService.state(), new String[]{"test"}, null, null, null)) {
+        for (ShardIterator shardIt : clusterService.operationRouting().searchShards(clusterService.state(), new String[]{"test"}, new String[]{"test"}, null, null, null)) {
             for (ShardRouting shardRouting : shardIt) {
                 InternalSearchRequest searchRequest = searchRequest(shardRouting, sourceBuilder, SearchType.QUERY_THEN_FETCH)
                         .scroll(new Scroll(new TimeValue(10, TimeUnit.MINUTES)));
@@ -182,7 +186,7 @@ public class ThreeShardsEmbeddedSearchTests extends AbstractNodesTests {
                 .from(0).size(60).explain(true).sort("age", SortOrder.ASC);
 
         List<DfsSearchResult> dfsResults = newArrayList();
-        for (ShardIterator shardIt : clusterService.operationRouting().searchShards(clusterService.state(), new String[]{"test"}, null, null, null)) {
+        for (ShardIterator shardIt : clusterService.operationRouting().searchShards(clusterService.state(), new String[]{"test"}, new String[]{"test"}, null, null, null)) {
             for (ShardRouting shardRouting : shardIt) {
                 InternalSearchRequest searchRequest = searchRequest(shardRouting, sourceBuilder, SearchType.QUERY_THEN_FETCH)
                         .scroll(new Scroll(new TimeValue(10, TimeUnit.MINUTES)));
@@ -276,7 +280,7 @@ public class ThreeShardsEmbeddedSearchTests extends AbstractNodesTests {
         }
 
         Map<SearchShardTarget, QueryFetchSearchResult> queryFetchResults = newHashMap();
-        for (ShardIterator shardIt : clusterService.operationRouting().searchShards(clusterService.state(), new String[]{"test"}, null, null, null)) {
+        for (ShardIterator shardIt : clusterService.operationRouting().searchShards(clusterService.state(), new String[]{"test"}, new String[]{"test"}, null, null, null)) {
             for (ShardRouting shardRouting : shardIt) {
                 InternalSearchRequest searchRequest = searchRequest(shardRouting, sourceBuilder, SearchType.QUERY_AND_FETCH)
                         .scroll(new Scroll(new TimeValue(10, TimeUnit.MINUTES)));
@@ -328,7 +332,7 @@ public class ThreeShardsEmbeddedSearchTests extends AbstractNodesTests {
                 .facet(FacetBuilders.queryFacet("test1", termQuery("name", "test1")));
 
         Map<SearchShardTarget, QuerySearchResultProvider> queryResults = newHashMap();
-        for (ShardIterator shardIt : clusterService.operationRouting().searchShards(clusterService.state(), new String[]{"test"}, null, null, null)) {
+        for (ShardIterator shardIt : clusterService.operationRouting().searchShards(clusterService.state(), new String[]{"test"}, new String[]{"test"}, null, null, null)) {
             for (ShardRouting shardRouting : shardIt) {
                 InternalSearchRequest searchRequest = searchRequest(shardRouting, sourceBuilder, SearchType.QUERY_THEN_FETCH)
                         .scroll(new Scroll(new TimeValue(10, TimeUnit.MINUTES)));

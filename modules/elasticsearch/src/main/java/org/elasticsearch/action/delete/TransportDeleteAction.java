@@ -94,6 +94,7 @@ public class TransportDeleteAction extends TransportShardReplicationOperationAct
 
     private void innerExecute(final DeleteRequest request, final ActionListener<DeleteResponse> listener) {
         ClusterState clusterState = clusterService.state();
+        request.routing(clusterState.metaData().resolveIndexRouting(request.routing(), request.index()));
         request.index(clusterState.metaData().concreteIndex(request.index())); // we need to get the concrete index here...
         if (clusterState.metaData().hasIndex(request.index())) {
             // check if routing is required, if so, do a broadcast delete
@@ -174,6 +175,8 @@ public class TransportDeleteAction extends TransportShardReplicationOperationAct
         Engine.Delete delete = indexShard.prepareDelete(request.type(), request.id(), request.version())
                 .origin(Engine.Operation.Origin.REPLICA);
 
+        indexShard.delete(delete);
+
         if (request.refresh()) {
             try {
                 indexShard.refresh(new Engine.Refresh(false));
@@ -182,7 +185,6 @@ public class TransportDeleteAction extends TransportShardReplicationOperationAct
             }
         }
 
-        indexShard.delete(delete);
     }
 
     @Override protected ShardIterator shards(ClusterState clusterState, DeleteRequest request) {

@@ -26,7 +26,16 @@ import org.apache.lucene.index.IndexReader;
 import org.elasticsearch.common.collect.ImmutableMap;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.index.Index;
-import org.elasticsearch.index.mapper.*;
+import org.elasticsearch.index.mapper.DocumentMapper;
+import org.elasticsearch.index.mapper.FieldMapper;
+import org.elasticsearch.index.mapper.FieldMappers;
+import org.elasticsearch.index.mapper.Uid;
+import org.elasticsearch.index.mapper.internal.SourceFieldMapper;
+import org.elasticsearch.index.mapper.internal.UidFieldMapper;
+import org.elasticsearch.index.mapper.selector.AllButSourceFieldSelector;
+import org.elasticsearch.index.mapper.selector.FieldMappersFieldSelector;
+import org.elasticsearch.index.mapper.selector.UidAndSourceFieldSelector;
+import org.elasticsearch.index.mapper.selector.UidFieldSelector;
 import org.elasticsearch.indices.TypeMissingException;
 import org.elasticsearch.search.SearchHitField;
 import org.elasticsearch.search.SearchParseElement;
@@ -44,6 +53,7 @@ import org.elasticsearch.search.internal.SearchContext;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -163,8 +173,12 @@ public class FetchPhase implements SearchPhase {
         if (sUid != null) {
             return Uid.createUid(sUid);
         }
-        // no type, nothing to do (should not really happen
-        throw new FetchPhaseExecutionException(context, "Failed to load uid from the index");
+        // no type, nothing to do (should not really happen)
+        List<String> fieldNames = new ArrayList<String>();
+        for (Fieldable field : doc.getFields()) {
+            fieldNames.add(field.name());
+        }
+        throw new FetchPhaseExecutionException(context, "Failed to load uid from the index, missing internal _uid field, current fields in the doc [" + fieldNames + "]");
     }
 
     private Document loadDocument(SearchContext context, FieldSelector fieldSelector, int docId) {
